@@ -4,12 +4,15 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>GolfTrack · Admin</title>
+
   <!-- Leaflet -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script defer src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+
   <!-- Leaflet Draw -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
-  <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+  <script defer src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+
   <style>
     :root { --bg:#0b0c10; --panel:#111217; --muted:#737a8c; --accent:#4f8cff; }
     * { box-sizing: border-box; }
@@ -39,7 +42,250 @@
     .hr { height:1px; background:#181b27; margin:10px 0; border:0; }
     .pill { padding:2px 6px; border-radius:6px; background:#16203a; color:#c9d4ff; font-size:11px; }
   </style>
+
+  <!-- Nuestro script principal -->
+  <script defer>
+    const $ = (q)=>document.querySelector(q);
+    const $$ = (q)=>document.querySelectorAll(q);
+
+    // API_BASE: si hospedás admin en Netlify y API en HF Spaces, setealo acá,
+    // via window.API_BASE o querystring ?api=https://golftrack-golftrack.hf.space
+    const API_BASE = (new URLSearchParams(location.search).get('api'))
+      || (window.API_BASE || 'https://golftrack-golftrack.hf.space');
+
+    const els = {
+      adminKey: null, btnBootstrap: null, btnImport: null, btnReload: null,
+      country: null, search: null, coursesList: null, courseSelect: null,
+      holeNum: null, holePar: null, btnDrawTee: null, btnDrawPin: null,
+      btnDrawGreen: null, btnClearShapes: null, btnSaveHole: null,
+      debugInfo: null, status: null
+    };
+
+    // Estado de mapa y capas
+    let map, baseOSM, baseSat, coursesLayer, drawn;
+    let mode = null; // 'tee' | 'pin' | 'green'
+    let teeLayer = null, pinLayer = null, greenLayer = null;
+    let allCourses = [];
+
+    function setStatus(msg, cls){
+      els.status.textContent = msg;
+      els.status.className = cls || '';
+    }
+
+    // --- Inicialización UI/Mapa ---
+    function initUI(){
+      els.adminKey = $('#adminKey');
+      els.btnBootstrap = $('#btnBootstrap');
+      els.btnImport = $('#btnImport');
+      els.btnReload = $('#btnReload');
+      els.country = $('#country');
+      els.search = $('#search');
+      els.coursesList = $('#coursesList');
+      els.courseSelect = $('#courseSelect');
+      els.holeNum = $('#holeNum');
+      els.holePar = $('#holePar');
+      els.btnDrawTee = $('#btnDrawTee');
+      els.btnDrawPin = $('#btnDrawPin');
+      els.btnDrawGreen = $('#btnDrawGreen');
+      els.btnClearShapes = $('#btnClearShapes');
+      els.btnSaveHole = $('#btnSaveHole');
+      els.debugInfo = $('#debugInfo');
+      els.status = $('#status');
+
+      map = L.map('map', { zoomControl: true }).setView([-34.6, -58.38], 6);
+      baseOSM = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom:19, attribution:'&copy; OpenStreetMap'}).addTo(map);
+      baseSat = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {maxZoom:19, attribution:'Esri WorldImagery'});
+      L.control.layers({ 'OSM': baseOSM, 'Satélite (Esri)': baseSat }, {}).addTo(map);
+
+      coursesLayer = L.geoJSON(null, {
+        onEachFeature: (feat, layer) => {
+          const name = (feat.properties?.name) || 'Golf course';
+          layer.bindPopup(`<b>${name}</b><br><small>${feat.properties?.osm_type}/${feat.properties?.osm_id}</small>`);
+        },
+        pointToLayer: (feat, latlng) => L.circleMarker(latlng, { radius:6 })
+      }).addTo(map);
+
+      drawn = new L.FeatureGroup();
+      map.addLayer(drawn);
+
+      const drawControl = new L.Control.Draw({
+        edit: { featureGroup: drawn, edit: true, remove: true },
+        draw: {
+          polygon: { allowIntersection:false, showArea:false, shapeOptions:{ weight:2 } },
+          polyline: false, rectangle: false, circle: false, circlemarker: false, marker: true
+        }
+      });
+      map.addControl(drawControl);
+
+      map.on(L.Draw.Event.CREATED, function (e) {
+        if (!mode) return;
+        const layer = e.layer;
+        if (mode === 'tee' || mode === 'pin') {
+          if (e.layerType !== 'marker') { alert('Usá el modo Punto para Tee/Pin'); return; }
+          if (mode === 'tee' && teeLayer) drawn.removeLayer(teeLayer);
+          if (mode === 'pin' && pinLayer) drawn.removeLayer(pinLayer);
+          drawn.addLayer(layer);
+          if (mode === 'tee') teeLayer = layer; else pinLayer = layer;
+        } else if (mode === 'green') {
+          if (e.layerType !== 'polygon') { alert('Usá el modo Polígono para Green'); return; }
+          if (greenLayer) drawn.removeLayer(greenLayer);
+          drawn.addLayer(layer);
+          greenLayer = layer;
+        }
+        mode = null;
+        setStatus('Figura agregada', 'ok');
+      });
+
+      // Botones de dibujo
+      els.btnDrawTee.onclick = ()=>{ mode='tee'; new L.Draw.Marker(map).enable(); setStatus('Colocá el Tee', 'warn'); };
+      els.btnDrawPin.onclick = ()=>{ mode='pin'; new L.Draw.Marker(map).enable(); setStatus('Colocá el Pin', 'warn'); };
+      els.btnDrawGreen.onclick = ()=>{ mode='green'; new L.Draw.Polygon(map).enable(); setStatus('Dibujá el Green', 'warn'); };
+      els.btnClearShapes.onclick = ()=>{ drawn.clearLayers(); teeLayer=pinLayer=greenLayer=null; setStatus('Limpio',''); };
+    }
+
+    // --- API helper ---
+    async function api(path, {method='GET', body=null, admin=false}={}){
+      const headers = { 'Accept':'application/json' };
+      if (body) headers['Content-Type'] = 'application/json';
+      if (admin) {
+        const key = els.adminKey.value.trim();
+        if (!key) throw new Error('Falta ADMIN_KEY');
+        headers['Authorization'] = 'Bearer ' + key;
+      }
+      const res = await fetch(API_BASE + path, { method, headers, body: body?JSON.stringify(body):null });
+      const ct = res.headers.get('content-type')||'';
+      const payload = await res.text();
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${payload.slice(0,300)}`);
+      if (!ct.includes('application/json')) {
+        throw new Error(`Respuesta no-JSON desde ${API_BASE+path}. Content-Type: ${ct}. Primeros 120 chars: ${payload.slice(0,120)}`);
+      }
+      try { return JSON.parse(payload); }
+      catch(e){ throw new Error(`JSON inválido (${e.message}). Primeros 120 chars: ${payload.slice(0,120)}`); }
+    }
+
+    // --- Cursos (mapa/lista) ---
+    async function loadCourses(){
+      const country = els.country.value;
+      setStatus('Cargando cursos…', 'warn');
+      const data = await api(`/courses?country=${encodeURIComponent(country)}`);
+      allCourses = (data.items||[]);
+      renderCoursesList(allCourses);
+      drawCoursesOnMap(allCourses);
+      fitToCourses();
+      fillCourseSelect(allCourses);
+      setStatus(`Cursos: ${allCourses.length}`, 'ok');
+      els.debugInfo.textContent = `country=${country} · count=${allCourses.length}`;
+    }
+
+    function drawCoursesOnMap(items){
+      coursesLayer.clearLayers();
+      const fc = { type:'FeatureCollection', features: [] };
+      for (const it of items){
+        if (!it.geometry) continue;
+        const [type, id] = (it.id||'').split('/');
+        fc.features.push({ type:'Feature', properties:{ name: it.name, osm_id: id, osm_type: type }, geometry: it.geometry });
+      }
+      coursesLayer.addData(fc);
+    }
+
+    function fitToCourses(){
+      const bounds = coursesLayer.getBounds();
+      if (bounds && bounds.isValid()) map.fitBounds(bounds.pad(0.1));
+    }
+
+    function renderCoursesList(items){
+      const q = els.search.value.trim().toLowerCase();
+      const filtered = items.filter(it => (it.name||'').toLowerCase().includes(q));
+      els.coursesList.innerHTML = '';
+      for (const it of filtered){
+        const li = document.createElement('li');
+        li.innerHTML = `<b>${it.name||'Sin nombre'}</b><br><small>${it.id}</small>`;
+        li.onclick = ()=>{
+          if (it.geometry && it.geometry.type === 'Point'){
+            map.setView([it.geometry.coordinates[1], it.geometry.coordinates[0]], 15);
+          } else if (it.geometry) {
+            try { const gj = L.geoJSON(it.geometry); map.fitBounds(gj.getBounds().pad(0.2)); } catch(e){}
+          }
+          Array.from(els.courseSelect.options).forEach(op => { if (op.value===it.id) op.selected = true; });
+        };
+        els.coursesList.appendChild(li);
+      }
+    }
+
+    function fillCourseSelect(items){
+      els.courseSelect.innerHTML = '';
+      for (const it of items){
+        const op = document.createElement('option');
+        op.value = it.id; op.textContent = it.name || it.id;
+        els.courseSelect.appendChild(op);
+      }
+    }
+
+    // --- Botones top ---
+    async function bootstrapDB(){
+      try{
+        setStatus('Bootstrapping…','warn');
+        await api('/admin/bootstrap', {method:'POST', admin:true});
+        setStatus('Bootstrap OK','ok');
+      }catch(e){ setStatus(e.message,'err'); alert(e.message); }
+    }
+    async function importCourses(){
+      try{
+        const country = els.country.value;
+        setStatus(`Importando cursos ${country}…`,'warn');
+        const r = await api(`/admin/osm/import/${encodeURIComponent(country)}`, {admin:true});
+        setStatus(`Import OK · inserted=${r.inserted} updated=${r.updated}`,'ok');
+        loadCourses();
+      }catch(e){ setStatus(e.message,'err'); alert(e.message); }
+    }
+
+    // --- Guardado de hoyos ---
+    async function saveHole(){
+      try{
+        const course_id = els.courseSelect.value; if(!course_id) throw new Error('Elegí un curso');
+        const number = parseInt(els.holeNum.value||'0',10); if(!number) throw new Error('N° de hoyo inválido');
+        const par = parseInt(els.holePar.value||'0',10) || null;
+
+        const tee = teeLayer ? { type:'Point', coordinates:[teeLayer.getLatLng().lng, teeLayer.getLatLng().lat] } : null;
+        const pin = pinLayer ? { type:'Point', coordinates:[pinLayer.getLatLng().lng, pinLayer.getLatLng().lat] } : null;
+
+        let green = null;
+        if (greenLayer) {
+          const latlngs = greenLayer.getLatLngs()[0] || [];
+          const ring = latlngs.map(ll => [ll.lng, ll.lat]);
+          if (ring.length && (ring[0][0] !== ring[ring.length-1][0] || ring[0][1] !== ring[ring.length-1][1])) ring.push(ring[0]);
+          green = { type:'Polygon', coordinates:[ ring ] };
+        }
+
+        const payload = {
+          id: `${course_id}-${number}`,
+          course_id, number, par, tee, pin, green,
+          data: { createdFrom:'admin-ui', ts:Date.now() }
+        };
+
+        setStatus('Guardando hoyo…','warn');
+        const r = await api('/admin/holes', {method:'POST', body:payload, admin:true});
+        setStatus(r.inserted ? 'Hoyo insertado' : 'Hoyo actualizado', 'ok');
+        alert('OK');
+      }catch(e){ setStatus(e.message,'err'); alert(e.message); }
+    }
+
+    // --- Wire-up y arranque ---
+    document.addEventListener('DOMContentLoaded', function(){
+      initUI();
+      // acciones
+      els.btnBootstrap.onclick = bootstrapDB;
+      els.btnImport.onclick = importCourses;
+      els.btnReload.onclick = () => loadCourses().catch(err=>setStatus(err.message,'err'));
+      els.search.addEventListener('input', ()=>renderCoursesList(allCourses));
+      els.btnSaveHole.onclick = saveHole;
+
+      // primera carga
+      loadCourses().catch(err=>{ setStatus(err.message,'err'); });
+    });
+  </script>
 </head>
+
 <body>
   <header>
     <h1>GolfTrack · <span class="tag">Admin</span></h1>
@@ -68,9 +314,7 @@
 
       <div class="panel stack">
         <h3>Canchas</h3>
-        <div class="row">
-          <input id="search" placeholder="Buscar por nombre..." style="flex:1" />
-        </div>
+        <div class="row"><input id="search" placeholder="Buscar por nombre..." style="flex:1" /></div>
         <small class="muted">Fuente: tabla <b>courses</b> (Neon). Para actualizar datos usa “Importar cursos”.</small>
         <ul id="coursesList"></ul>
       </div>
@@ -109,265 +353,5 @@
       <div class="legend">Base: OSM · Satélite: ESRI · Dibujar con barra de herramientas</div>
     </main>
   </div>
-
-<script defer>
-(function(){
-  const $ = (q)=>document.querySelector(q);
-  const $$ = (q)=>document.querySelectorAll(q);
-  // API_BASE: cuando admin está hospedado en Netlify y API en HF Spaces,
-// apuntá a la URL del Space. También soporta ?api=https://... o window.API_BASE inyectado.
-const API_BASE = (new URLSearchParams(location.search).get('api'))
-  || (window.API_BASE || 'https://golftrack-golftrack.hf.space');
-
-  const els = {
-    adminKey: $('#adminKey'),
-    btnBootstrap: $('#btnBootstrap'),
-    btnImport: $('#btnImport'),
-    btnReload: $('#btnReload'),
-    country: $('#country'),
-    search: $('#search'),
-    coursesList: $('#coursesList'),
-    courseSelect: $('#courseSelect'),
-    holeNum: $('#holeNum'),
-    holePar: $('#holePar'),
-    btnDrawTee: $('#btnDrawTee'),
-    btnDrawPin: $('#btnDrawPin'),
-    btnDrawGreen: $('#btnDrawGreen'),
-    btnClearShapes: $('#btnClearShapes'),
-    btnSaveHole: $('#btnSaveHole'),
-    debugInfo: $('#debugInfo'),
-    status: $('#status'),
-  };
-
-  // ------------------ MAPA ------------------
-  const map = L.map('map', { zoomControl: true }).setView([-34.6, -58.38], 6);
-  const baseOSM = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    maxZoom: 19, attribution: '&copy; OpenStreetMap'
-  }).addTo(map);
-  const baseSat = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-    maxZoom: 19, attribution: 'Esri WorldImagery'
-  });
-  L.control.layers({ 'OSM': baseOSM, 'Satélite (Esri)': baseSat }, {}).addTo(map);
-
-  const coursesLayer = L.geoJSON(null, {
-    onEachFeature: (feat, layer) => {
-      const name = (feat.properties?.name) || 'Golf course';
-      layer.bindPopup(`<b>${name}</b><br><small>${feat.properties?.osm_type}/${feat.properties?.osm_id}</small>`);
-    },
-    pointToLayer: (feat, latlng) => L.circleMarker(latlng, { radius:6 })
-  }).addTo(map);
-
-  // Grupo de edición para Tee/Pin/Green
-  const drawn = new L.FeatureGroup();
-  map.addLayer(drawn);
-
-  const drawControl = new L.Control.Draw({
-    edit: { featureGroup: drawn, edit: true, remove: true },
-    draw: {
-      polygon: { allowIntersection:false, showArea:false, shapeOptions:{ weight:2 } },
-      polyline: false,
-      rectangle: false,
-      circle: false,
-      circlemarker: false,
-      marker: true
-    }
-  });
-  map.addControl(drawControl);
-
-  let mode = null; // 'tee' | 'pin' | 'green'
-  let teeLayer = null, pinLayer = null, greenLayer = null;
-
-  function clearShapes(){
-    drawn.clearLayers();
-    teeLayer = pinLayer = greenLayer = null;
-  }
-
-  function setStatus(msg, cls){
-    els.status.textContent = msg;
-    els.status.className = cls || '';
-  }
-
-  // Controlamos qué se dibuja según el modo
-  map.on(L.Draw.Event.CREATED, function (e) {
-    if (!mode) return;
-    const layer = e.layer;
-    if (mode === 'tee' || mode === 'pin') {
-      if (e.layerType !== 'marker') { alert('Usá el modo Punto para Tee/Pin'); return; }
-      if (mode === 'tee' && teeLayer) drawn.removeLayer(teeLayer);
-      if (mode === 'pin' && pinLayer) drawn.removeLayer(pinLayer);
-      drawn.addLayer(layer);
-      if (mode === 'tee') teeLayer = layer; else pinLayer = layer;
-    } else if (mode === 'green') {
-      if (e.layerType !== 'polygon') { alert('Usá el modo Polígono para Green'); return; }
-      if (greenLayer) drawn.removeLayer(greenLayer);
-      drawn.addLayer(layer);
-      greenLayer = layer;
-    }
-    mode = null;
-    setStatus('Figura agregada', 'ok');
-  });
-
-  // Botones de dibujo
-  els.btnDrawTee.onclick = ()=>{ mode='tee'; new L.Draw.Marker(map).enable(); setStatus('Colocá el Tee', 'warn'); };
-  els.btnDrawPin.onclick = ()=>{ mode='pin'; new L.Draw.Marker(map).enable(); setStatus('Colocá el Pin', 'warn'); };
-  els.btnDrawGreen.onclick = ()=>{ mode='green'; new L.Draw.Polygon(map).enable(); setStatus('Dibujá el Green', 'warn'); };
-  els.btnClearShapes.onclick = ()=>{ clearShapes(); setStatus('Limpio', ''); };
-
-  // ------------------ API helpers ------------------
-  async function api(path, {method='GET', body=null, admin=false}={}){
-    const headers = { 'Accept':'application/json' };
-    if (body) headers['Content-Type'] = 'application/json';
-    if (admin) {
-      const key = els.adminKey.value.trim();
-      if (!key) throw new Error('Falta ADMIN_KEY');
-      headers['Authorization'] = 'Bearer ' + key;
-    }
-    const res = await fetch(API_BASE + path, { method, headers, body: body?JSON.stringify(body):null });
-    const ct = res.headers.get('content-type')||'';
-    const payload = await res.text();
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}: ${payload.slice(0,300)}`);
-    }
-    if (!ct.includes('application/json')) {
-      throw new Error(`Respuesta no-JSON desde ${API_BASE+path}. Content-Type: ${ct}. Primeros 120 chars: ${payload.slice(0,120)}`);
-    }
-    try { return JSON.parse(payload); } catch(e){
-      throw new Error(`JSON inválido (${e.message}). Primeros 120 chars: ${payload.slice(0,120)}`);
-    }
-  };
-    if (body) headers['Content-Type'] = 'application/json';
-    if (admin) {
-      const key = els.adminKey.value.trim();
-      if (!key) throw new Error('Falta ADMIN_KEY');
-      headers['Authorization'] = 'Bearer ' + key;
-    }
-    const res = await fetch(API_BASE + path, { method, headers, body: body?JSON.stringify(body):null });
-    if (!res.ok) {
-      const txt = await res.text();
-      throw new Error(`HTTP ${res.status}: ${txt}`);
-    }
-    return res.json();
-  }
-
-  // Carga de cursos a partir de /courses
-  let allCourses = [];
-  async function loadCourses(){
-    const country = els.country.value;
-    setStatus('Cargando cursos…', 'warn');
-    const data = await api(`/courses?country=${encodeURIComponent(country)}`);
-    allCourses = (data.items||[]);
-    renderCoursesList(allCourses);
-    drawCoursesOnMap(allCourses);
-    fitToCourses();
-    fillCourseSelect(allCourses);
-    setStatus(`Cursos: ${allCourses.length}`, 'ok');
-    els.debugInfo.textContent = `country=${country} · count=${allCourses.length}`;
-  }
-
-  function drawCoursesOnMap(items){
-    coursesLayer.clearLayers();
-    const fc = { type:'FeatureCollection', features: [] };
-    for (const it of items){
-      if (!it.geometry) continue;
-      fc.features.push({ type:'Feature', properties:{ name: it.name, osm_id: it.id?.split('/')?.[1], osm_type: it.id?.split('/')?.[0] }, geometry: it.geometry });
-    }
-    coursesLayer.addData(fc);
-  }
-
-  function fitToCourses(){
-    const bounds = coursesLayer.getBounds();
-    if (bounds && bounds.isValid()) map.fitBounds(bounds.pad(0.1));
-  }
-
-  function renderCoursesList(items){
-    const q = els.search.value.trim().toLowerCase();
-    const filtered = items.filter(it => (it.name||'').toLowerCase().includes(q));
-    els.coursesList.innerHTML = '';
-    for (const it of filtered){
-      const li = document.createElement('li');
-      li.innerHTML = `<b>${it.name||'Sin nombre'}</b><br><small>${it.id}</small>`;
-      li.onclick = ()=>{
-        // centra el mapa en el curso
-        if (it.geometry && it.geometry.type === 'Point'){
-          map.setView([it.geometry.coordinates[1], it.geometry.coordinates[0]], 15);
-        } else if (it.geometry) {
-          try {
-            const gj = L.geoJSON(it.geometry);
-            map.fitBounds(gj.getBounds().pad(0.2));
-          } catch(e) {}
-        }
-        // setea selección para el editor
-        Array.from(els.courseSelect.options).forEach(opt => { if (opt.value===it.id) opt.selected = true; });
-      };
-      els.coursesList.appendChild(li);
-    }
-  }
-
-  function fillCourseSelect(items){
-    els.courseSelect.innerHTML = '';
-    for (const it of items){
-      const op = document.createElement('option');
-      op.value = it.id; op.textContent = it.name || it.id;
-      els.courseSelect.appendChild(op);
-    }
-  }
-
-  els.search.addEventListener('input', ()=>renderCoursesList(allCourses));
-  els.btnReload.onclick = loadCourses;
-
-  // Bootstrap + Import
-  els.btnBootstrap.onclick = async ()=>{
-    try{
-      setStatus('Bootstrapping…','warn');
-      await api('/admin/bootstrap', {method:'POST', admin:true});
-      setStatus('Bootstrap OK','ok');
-    }catch(e){ setStatus(e.message,'err'); alert(e.message); }
-  };
-
-  els.btnImport.onclick = async ()=>{
-    try{
-      const country = els.country.value;
-      setStatus(`Importando cursos ${country}…`,'warn');
-      const r = await api(`/admin/osm/import/${encodeURIComponent(country)}`, {admin:true});
-      setStatus(`Import OK · inserted=${r.inserted} updated=${r.updated}`,'ok');
-      await loadCourses();
-    }catch(e){ setStatus(e.message,'err'); alert(e.message); }
-  };
-
-  // Guardar hoyo
-  els.btnSaveHole.onclick = async ()=>{
-    try{
-      const course_id = els.courseSelect.value; if(!course_id) throw new Error('Elegí un curso');
-      const number = parseInt(els.holeNum.value||'0',10); if(!number) throw new Error('N° de hoyo inválido');
-      const par = parseInt(els.holePar.value||'0',10) || null;
-
-      const tee = teeLayer ? { type:'Point', coordinates: [teeLayer.getLatLng().lng, teeLayer.getLatLng().lat] } : null;
-      const pin = pinLayer ? { type:'Point', coordinates: [pinLayer.getLatLng().lng, pinLayer.getLatLng().lat] } : null;
-      let green = null;
-      if (greenLayer) {
-        const latlngs = greenLayer.getLatLngs()[0] || [];
-        const ring = latlngs.map(ll => [ll.lng, ll.lat]);
-        if (ring.length && (ring[0][0] !== ring[ring.length-1][0] || ring[0][1] !== ring[ring.length-1][1]))
-          ring.push(ring[0]);
-        green = { type:'Polygon', coordinates:[ ring ] };
-      }
-
-      const payload = {
-        id: `${course_id}-${number}`,
-        course_id, number, par, tee, pin, green,
-        data: { createdFrom: 'admin-ui', ts: Date.now() }
-      };
-
-      setStatus('Guardando hoyo…','warn');
-      const r = await api('/admin/holes', {method:'POST', body:payload, admin:true});
-      setStatus(r.inserted ? 'Hoyo insertado' : 'Hoyo actualizado', 'ok');
-      alert('OK');
-    }catch(e){ setStatus(e.message,'err'); alert(e.message); }
-  };
-  // Primera carga (IIFE para poder usar await con módulos)
-    // Primera carga
-  loadCourses().catch(err=>{ setStatus(err.message,'err'); });
-})();
-</script>
 </body>
 </html>
