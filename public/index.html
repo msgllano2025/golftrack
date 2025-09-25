@@ -110,7 +110,7 @@
     </main>
   </div>
 
-<script>
+<script type="module">
 (function(){
   const $ = (q)=>document.querySelector(q);
   const $$ = (q)=>document.querySelectorAll(q);
@@ -364,9 +364,11 @@ const API_BASE = (new URLSearchParams(location.search).get('api'))
       alert('OK');
     }catch(e){ setStatus(e.message,'err'); alert(e.message); }
   };
-
-  // Primera carga
-  loadCourses().catch(err=>{ setStatus(err.message,'err'); });
+  // Primera carga (IIFE para poder usar await con módulos)
+  (async ()=>{
+    try { await loadCourses(); }
+    catch(err){ setStatus(err.message,'err'); }
+  })();
 })();
 </script>
 </body>
