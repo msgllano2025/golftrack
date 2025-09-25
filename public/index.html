@@ -114,7 +114,10 @@
 (function(){
   const $ = (q)=>document.querySelector(q);
   const $$ = (q)=>document.querySelectorAll(q);
-  const API_BASE = '';// mismo host
+  // API_BASE: cuando admin está hospedado en Netlify y API en HF Spaces,
+// apuntá a la URL del Space. También soporta ?api=https://... o window.API_BASE inyectado.
+const API_BASE = (new URLSearchParams(location.search).get('api'))
+  || (window.API_BASE || 'https://golftrack-golftrack.hf.space');
 
   const els = {
     adminKey: $('#adminKey'),
@@ -213,6 +216,25 @@
   // ------------------ API helpers ------------------
   async function api(path, {method='GET', body=null, admin=false}={}){
     const headers = { 'Accept':'application/json' };
+    if (body) headers['Content-Type'] = 'application/json';
+    if (admin) {
+      const key = els.adminKey.value.trim();
+      if (!key) throw new Error('Falta ADMIN_KEY');
+      headers['Authorization'] = 'Bearer ' + key;
+    }
+    const res = await fetch(API_BASE + path, { method, headers, body: body?JSON.stringify(body):null });
+    const ct = res.headers.get('content-type')||'';
+    const payload = await res.text();
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}: ${payload.slice(0,300)}`);
+    }
+    if (!ct.includes('application/json')) {
+      throw new Error(`Respuesta no-JSON desde ${API_BASE+path}. Content-Type: ${ct}. Primeros 120 chars: ${payload.slice(0,120)}`);
+    }
+    try { return JSON.parse(payload); } catch(e){
+      throw new Error(`JSON inválido (${e.message}). Primeros 120 chars: ${payload.slice(0,120)}`);
+    }
+  };
     if (body) headers['Content-Type'] = 'application/json';
     if (admin) {
       const key = els.adminKey.value.trim();
