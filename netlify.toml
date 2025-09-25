@@ -1,0 +1,15 @@
+[build]
+  publish = "public"   # carpeta donde está index.html (cámbiala a la tuya)
+  command = ""         # vacío si es sitio estático puro
+
+# Single Page App: redirigir rutas internas al index
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+# CORS opcional (si querés llamar a la API del Space por HTTPS)
+[[headers]]
+  for = "/*"
+  [headers.values]
+    Access-Control-Allow-Origin = "*"
